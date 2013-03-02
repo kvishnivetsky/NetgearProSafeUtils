@@ -1,4 +1,4 @@
-NetgearProSafeUtils
+NETGEAR ProSafePlus Utils
 ===================
 
-Firmware update and configuration utilities for NETGEAR ProSafe switched
+Firmware update and configuration utilities for NETGEAR ProSafePlus switched
