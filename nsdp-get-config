@@ -1,0 +1,198 @@
+#!/usr/bin/perl -w
+
+use strict;
+use utf8;
+use IO::Select;
+use IO::Socket;
+use Data::Dumper;
+
+my $sock = IO::Socket::INET->new(
+    Proto     => 'udp',
+    LocalAddr => '0.0.0.0',
+#    LocalAddr => '172.16.0.2',
+    Broadcast => 1,
+    LocalPort => 63321,
+    ReuseAddr => 1
+    ) or die "Can't bind : $@\n";
+
+#$sock->sockopt(SO_BROADCAST() => 1);
+
+my $select = IO::Select->new($sock);
+my $seq = rand(65535);
+my $state = 0;
+my $DEBUG = 0;
+my $swmac = "\0x00\0x00\0x00\0x00\0x00\0x00";
+my $DST_ADDR = pack('CCCC', 172,16,0,255);
+
+sendDiscover($sock, $seq++);
+
+my $isAlive = 1;
+while($isAlive) {
+    my @ready = $select->can_read(1);
+    if (@ready) {
+	my $data = undef;
+	my $from = recv($sock, $data, 1500, 0) || die "recv: $!";
+	my($port, $from_addr) = sockaddr_in($from);
+	my @hexdata = unpack("C*", $data);
+	printf "%s\n", join(' ', map(sprintf("0x%.2x", $_), @hexdata)) if $DEBUG;
+
+	parseNSDP($data);
+
+	my $offset = 32;
+	my $isDone = 0;
+	while(!($isDone) && $offset < length($data)) {
+	    my $type = unpack("n", substr($data, $offset)); $offset += 2;
+	    if ($type == 0x0000) {
+		$isDone = 1;
+		print "\n";
+		next;
+	    }
+	    if ($type == 0xffff) {
+		$isDone = 1;
+		print "\n";
+		next;
+	    }
+	    my $len = unpack("n", substr($data, $offset)); $offset += 2;
+	    my $val = substr($data, $offset, $len); $offset += $len;
+	    if ($type == 0x0001) {
+		$val =~ s/ +//;
+		printf "Device Model: %s\n", $val;
+		next;
+	    }
+	    if ($type == 0x0003) {
+		$val =~ s/ +//;
+		printf "Device Name: %s\n", $val;
+		next;
+	    }
+	    if ($type == 0x0004) {
+		printf "MAC: %s\n", join(':', map(sprintf("%.2x", $_), unpack("C*", $val)));
+		$swmac = $val;
+		next;
+	    }
+	    if ($type == 0x0006) {
+		printf "IP Address: %s\n", join('.', unpack("C*", $val));
+		next;
+	    }
+	    if ($type == 0x0007) {
+		printf "Network Mask: %s\n", join('.', unpack("C*", $val));
+		next;
+	    }
+	    if ($type == 0x0008) {
+		printf "Gateway: %s\n", join('.', unpack("C*", $val));
+		next;
+	    }
+	    if ($type == 0x000b) {
+		printf "DHCP Client: %d\n", unpack('C', $val);
+		next;
+	    }
+	    if ($type == 0x000d) {
+		printf "Firmware version: %s\n", $val;
+		next;
+	    }
+	    if ($type == 0x0c00) {
+#		my $val = substr($data, $offset, $len); $offset += $len;
+		my($port, $speed, $duplex) = unpack('CCC', $val);
+		printf "Port: %d, Speed: %s, Duplex: %d\n", $port, portSpeed($speed), $duplex;
+		next;
+	    }
+	    if ($type == 0x1000) {
+		my @stat = unpack('CNNNNNNNNNNNN', $val);
+		printf "T(%.2x)L(%d)V(%d,%d,%d,%d,%d,%d,%d)\n", $type, $len, $stat[0], $stat[1], $stat[3], $stat[5], $stat[7], $stat[9], $stat[11];
+		next;
+	    }
+	    if ($type == 0x2800) {
+		my($vlan, $membership) = unpack('na2', $val);
+		my($uports, $tports) = unpack('CC', $membership);
+		my $pvids = $tports ^ $uports;
+		printf "VLAN: %.4d m:%s tu:%s p:%s\n", $vlan, substr(unpack('B8', pack('C', $uports)),0,5), substr(unpack('B8', pack('C', $tports)),0,5), substr(unpack('B8', pack('C', $pvids)),0,5);
+		next;
+	    }
+	    if ($type == 0x5c00) {
+		printf "T(%.2x)L(%d)V(%s)\n", $type, $len, join(' ', map(sprintf('%.2x', $_), unpack('C*', $val)));
+		next;
+	    }
+	    if ($len == 0x01) {
+		printf "%.4x(%.4x)=%.2x\n", $type, $len, unpack('C', $val) if $DEBUG;
+		next;
+	    }
+	    if ($len == 0x02) {
+		printf "%.4x(%.4x)=%.4x\n", $type, $len, unpack('n', $val) if $DEBUG;
+		next;
+	    }
+	    printf "%.4x(%.4x)\n", $type, $len if $DEBUG;
+	}
+    } else {
+	$isAlive = 0;
+    }
+}
+
+$sock->close();
+
+exit;
+
+sub sendDiscover {
+    my $sock = shift;
+    my $seq = shift;
+    my $msg = pack('na6a6a6Sna4N', 0x0101, "\0x00\0x00\0x00\0x00\0x00\0x00", "\xe0\x69\x95\x38\x97\x69", "\x00\x00\x00\x00\x00\x00", 0x0000, $seq, "NSDP", 0x00000000);
+    $msg .= "\x00\x01\x00\x00";
+    $msg .= "\x00\x02\x00\x00";
+    $msg .= "\x00\x03\x00\x00";
+    $msg .= "\x00\x04\x00\x00";
+    $msg .= "\x00\x05\x00\x00";
+    $msg .= "\x00\x06\x00\x00";
+    $msg .= "\x00\x07\x00\x00";
+    $msg .= "\x00\x08\x00\x00";
+    $msg .= "\x00\x0b\x00\x00";
+    $msg .= "\x00\x0c\x00\x00";
+    $msg .= "\x00\x0d\x00\x00";
+    $msg .= "\x00\x0f\x00\x00";
+    $msg .= "\x0c\x00\x00\x00";
+    $msg .= "\x10\x00\x00\x00";
+    $msg .= "\x28\x00\x00\x00";
+    $msg .= "\x5c\x00\x00\x00";
+    $msg .= "\xff\xff\x00\x00";
+    my @hexdata = unpack("C*", $msg);
+    printf "%s\n", join(' ', map(sprintf("0x%.2x", $_), @hexdata)) if $DEBUG;
+    my $dst = sockaddr_in(63322, $DST_ADDR);
+    $sock->send($msg, 0, $dst) or die "send: $!";
+};
+
+sub sendPassword {
+    my $sock = shift;
+    my $seq = shift;
+    my $swmac = shift;
+    my $password = shift;
+    my $msg = pack('na6a6a6Sna4N', 0x0103, "\000\000\000\000\000\000", "\xe0\x69\x95\x38\x97\x69", $swmac, 0x0000, $seq, "NSDP", 0x0000);
+    $msg .= pack('nna'.length($password), 0x000a, length($password), $password); # TLV with password
+    $msg .= pack('nnCCCC', 0x000b, 0x0001, 0); # DHCP mode On|Off
+    $msg .= pack('nnCCCC', 0x0006, 0x0004, 172,16,0,3); # Device IP address
+    $msg .= pack('nnCCCC', 0x0007, 0x0004, 255,255,255,0); # Device IP address
+    $msg .= pack('nnCCCC', 0x0008, 0x0004, 172,16,0,2); # GW IP address
+    $msg .= pack('nn', 0xffff, 0x0000); # trailer
+    my @hexdata = unpack("C*", $msg);
+    printf "%s\n", join(' ', map(sprintf("0x%.2x", $_), @hexdata));
+    my $dst = sockaddr_in(63322, $DST_ADDR);
+    $sock->send($msg, 0, $dst) or die "send: $!";
+};
+
+sub parseNSDP {
+    my $data = shift;
+    my($ctype, $reserved, $selfmac, $dstmac, $reserved1, $seq, $sign, $reserved2) = unpack('na6a6a6a2na4Nn', $data);
+    my @selfmac_ = unpack('C6', $selfmac);
+    my @dstmac_ = unpack('C6', $dstmac);
+    printf "ctype=%.4x\n", $ctype if $DEBUG;
+    printf "selfmac=%s\n", join(':', map(sprintf("%.2x", $_), @selfmac_)) if $DEBUG;
+    printf "dstmac=%s\n", join(':', map(sprintf("%.2x", $_), @dstmac_)) if $DEBUG;
+    printf "seq=%.4x\n", $seq if $DEBUG;
+    printf "sign=%s\n", $sign if $DEBUG;
+};
+
+# --------------------------
+
+sub portSpeed {
+    my $speed = shift;
+    return "Down" if 0 == $speed;
+    return "10M" if 1 == $speed;
+    return "100M" if 4 == $speed;
+    return "1000M" if 5 == $speed;
+};

@@ -1,0 +1,130 @@
+#!/usr/bin/perl -w
+
+#######################################################################
+#
+# NSDP firmware update script v.1.0
+# Copyright 2012 Konstantin S. Vishnivetsky
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# For contacts:
+# WEB: http://www.vishnivetsky.ru
+# E-mail: kos@vishnivetsky.ru
+# SkyPE: kvishnivetsky
+# ICQ: 328-468-511
+# Phone: +7 913 774-7588
+#
+#######################################################################
+
+use strict;
+use utf8;
+use IO::Select;
+use IO::Socket;
+use Data::Dumper;
+
+#######################################################################
+#               !!! ATTENTION !!!!
+# Some settings are empty - fill it with YOUR settings, please.
+#               !!! ATTENTION !!!!
+############ Initial config begin #####################################
+my $DEBUG = 0;
+my $selfmac = ;	# HWAddr of your network interface Example: "\x00\x05\x5d\x74\x73\x3d" (in most cases you need to set it once)
+my $swmac   = ;	# HWAddr of your NETGEAR prosafe switch Example: "\xe0\x91\xf5\x93\x6e\x2d"
+my $sw_ip   = ; # IP address of your NETGEAR prosafe switch Example '172.16.0.3'
+my $sw_fw   = ; # Firmware in *.hex file
+#my $DST_ADDR = pack('CCCC', 255,255,255,255);	# Global broadcast addr - use on single interface host
+#my $DST_ADDR = pack('CCCC', 172,16,0,255);	# Local broadcast addr of your network - use on multiple interface host
+############ Initial config end ################
+
+my $seq = rand(65535);
+
+printf "Initializing switch for TFTP upload\n" if $DEBUG;
+FwUpdate(63321);
+printf "Waiting...\n";
+sleep(5);
+printf "Sending file %s via TFTP to %s\n", $sw_fw, $sw_ip if $DEBUG;
+`atftp -p --verbose --trace -l $sw_fw -r $sw_fw $sw_ip`;
+
+exit 0;
+
+sub FwUpdate {
+    my $SRC_PORT = shift;
+    my $sock = IO::Socket::INET->new(
+        Proto     => 'udp',
+        LocalAddr => '0.0.0.0',
+        Broadcast => 1,
+        LocalPort => $SRC_PORT,
+        ReuseAddr => 1
+    ) or die "Can't bind : $@\n";
+    my $select = IO::Select->new($sock);
+
+    sendFwUpdate($sock, $seq++, $selfmac, $swmac, "password");
+
+    my $isAlive = 1;
+    while($isAlive) {
+	my @ready = $select->can_read(5);
+	if (@ready) {
+	    my $data = undef;
+	    my $from = recv($sock, $data, 1500, 0) || die "recv: $!";
+	    my($port, $from_addr) = sockaddr_in($from);
+	    my @hexdata = unpack("C*", $data);
+	    printf "<< %s\n", join(' ', map(sprintf("0x%.2x", $_), @hexdata)) if $DEBUG;
+
+	    parseNSDP($data);
+	    $isAlive = 0;
+	} else {
+	    printf STDERR "Timeout!\n";
+	    $sock->close();
+	    exit -1;
+	}
+    };
+
+    $sock->close();
+}
+
+sub sendFwUpdate {
+    my $sock = shift;
+    my $seq = shift;
+    my $selfmac = shift;
+    my $swmac = shift;
+    my $password = shift;
+    my $msg = pack('nC6a6a6Sna4N',
+        0x0103,
+        0x00,0x00,0x00,0x00,0x00,0x00,
+        $selfmac,
+        $swmac,
+        0x0000,
+        $seq,
+        "NSDP",
+        0x0000);
+    $msg .= pack('nna'.length($password), 0x000a, length($password), $password); # TLV with password
+    $msg .= pack('nnC', 0x0010, 0x0001, 0x01); # DHCP mode On|Off
+    $msg .= pack('nn', 0xffff, 0x0000); # trailer
+    my @hexdata = unpack("C*", $msg);
+    printf ">> %s\n", join(' ', map(sprintf("0x%.2x", $_), @hexdata)) if $DEBUG;
+    my $dst = sockaddr_in(63322, $DST_ADDR);
+    $sock->send($msg, 0, $dst) or die "send: $!";
+};
+
+sub parseNSDP {
+    my $data = shift;
+    my($ctype, $reserved, $selfmac, $dstmac, $reserved1, $seq, $sign, $reserved2) = unpack('na6a6a6a2na4Nn', $data);
+    my @selfmac_ = unpack('C6', $selfmac);
+    my @dstmac_ = unpack('C6', $dstmac);
+    printf "ctype=%.4x\n", $ctype if $DEBUG;
+    printf "selfmac=%s\n", join(':', map(sprintf("%.2x", $_), @selfmac_)) if $DEBUG;
+    printf "dstmac=%s\n", join(':', map(sprintf("%.2x", $_), @dstmac_)) if $DEBUG;
+    printf "seq=%.4x\n", $seq if $DEBUG;
+    printf "sign=%s\n", $sign if $DEBUG;
+};

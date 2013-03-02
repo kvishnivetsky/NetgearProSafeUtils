@@ -1,0 +1,194 @@
+#!/usr/bin/perl -w
+
+#######################################################################
+#
+# NSDP discovery script v.1.0
+# Copyright 2012 Konstantin S. Vishnivetsky
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# For contacts:
+# WEB: http://www.vishnivetsky.ru
+# E-mail: kos@vishnivetsky.ru
+# SkyPE: kvishnivetsky
+# ICQ: 328-468-511
+# Phone: +7 913 774-7588
+#
+#######################################################################
+
+use strict;
+use utf8;
+use IO::Select;
+use IO::Socket;
+use Data::Dumper;
+use NSDP;
+
+package NSDP;
+
+my $sock = IO::Socket::INET->new(
+    Proto     => 'udp',
+    LocalAddr => '0.0.0.0',
+    Broadcast => 1,
+    LocalPort => 63321,
+    ReuseAddr => 1
+    ) or die "Can't bind : $@\n";
+
+my $select = IO::Select->new($sock);
+my $seq = rand(65535);
+my $DEBUG = 0;
+my $selfmac = "\x0e\x69\x95\x38\x97\x69";
+my $swmac = "\x00\x00\x00\x00\x00\x00";
+my $DST_ADDR = pack('CCCC', 172,16,0,255);
+my %DEVICES = ();
+
+setDebug($DEBUG);
+
+##############################################
+# Stage 1: sending request for MAC and models#
+##############################################
+
+printf "Discover sent, waiting for responses...\n" if $DEBUG;
+my @info = (
+    TLV_MAC,
+    TLV_MODEL,
+);
+NSDP_send($sock, $DST_ADDR, $selfmac, $swmac, $seq++, join('', map(pack('nn', $_, 0x0000), @info)));
+
+my $isAlive = 1;
+while($isAlive) {
+    my @ready = $select->can_read(1);
+    if (@ready) {
+	my $data = undef;
+	my $from = recv($sock, $data, 1500, 0) || die "recv: $!";
+	my($port, $from_addr) = sockaddr_in($from);
+	my @hexdata = unpack('C*', $data);
+	printf "%s\n", join(' ', map(sprintf("0x%.2x", $_), @hexdata)) if $DEBUG;
+
+	NSDP_ParseHeader($data);
+
+	my ($resp_mac, $resp_model);
+	my $offset = 32;
+	my $done = 0;
+	while(!$done) {
+	    my ($type, $len) = unpack('nn', substr($data, $offset)); $offset += 4;
+	    if (defined($type) && defined($len)) {
+		my $val = substr($data, $offset, $len); $offset += $len;
+		if ($type == TLV_MODEL) { # Model Name
+		    $val =~ s/ +//;
+		    $resp_model = $val;
+		    next;
+		}
+		if ($type == TLV_MAC) { # MAC
+		    $resp_mac = $val;
+		    next;
+		}
+	    } else {
+		$done = 1;
+		$DEVICES{$resp_mac} = $resp_model;
+	    }
+	}
+    } else {
+	$isAlive = 0;
+    }
+};
+
+################################################
+# Stage 2: sending individual requests for info#
+################################################
+
+foreach my $device(keys(%DEVICES)) {
+    printf "Sending request to %s (%s)\n", join(':', map(sprintf("%.2x", $_), unpack('C*', $device))), $DEVICES{$device} if $DEBUG;
+    if ($DEVICES{$device} eq 'FS116E') {
+	@info = (
+	    TLV_MAC,
+	    TLV_MODEL,
+	    TLV_NAME,
+	)
+    } else {
+	@info = (
+	    TLV_MAC,
+	    TLV_MODEL,
+	    TLV_FWVER,
+	    TLV_IP,
+	    TLV_MASK,
+	    TLV_GW,
+	    TLV_NAME,
+	)
+    }
+    NSDP_send($sock, $DST_ADDR, $selfmac, $device, $seq++, join('', map(pack('nn', $_, 0x0000), @info)));
+}
+
+$isAlive = 1;
+while($isAlive) {
+    my @ready = $select->can_read(1);
+    if (@ready) {
+	my $data = undef;
+	my $from = recv($sock, $data, 1500, 0) || die "recv: $!";
+	my($port, $from_addr) = sockaddr_in($from);
+	my @hexdata = unpack("C*", $data);
+	printf "%s\n", join(' ', map(sprintf("0x%.2x", $_), @hexdata)) if $DEBUG;
+
+	NSDP_ParseHeader($data);
+
+	my $offset = 32;
+	my $done = 0;
+	while(!$done) {
+	    my ($type, $len) = unpack("nn", substr($data, $offset)); $offset += 4;
+	    if (defined($type) && defined($len)) {
+		my $val = substr($data, $offset, $len); $offset += $len;
+		if ($type == TLV_MODEL) { # Model Name
+		    $val =~ s/ +//;
+		    printf "%s ", $val;
+		    next;
+		}
+		if ($type == TLV_NAME) { # Device Name
+		    $val =~ s/ +//;
+		    printf "%s ", $val;
+		    next;
+		}
+		if ($type == TLV_MAC) { # MAC
+		    printf "%s ", join(':', map(sprintf("%.2x", $_), unpack("C*", $val)));
+		    next;
+		}
+		if ($type == TLV_IP) { # IP
+		    printf "%s ", join('.', unpack("C*", $val));
+		    next;
+		}
+		if ($type == TLV_MASK) { # MASK
+		    printf "%s ", join('.', unpack("C*", $val));
+		    next;
+		}
+		if ($type == TLV_GW) { # GW
+		    printf "%s ", join('.', unpack("C*", $val));
+		    next;
+		}
+		if ($type == TLV_FWVER) { # Device Firmware Version
+		    printf "%s ", $val;
+		    next;
+		}
+	    } else {
+		print "\n";
+		$done = 1;
+	    }
+	}
+    } else {
+	$isAlive = 0;
+    }
+};
+
+
+
+$sock->close();
+
+exit;
