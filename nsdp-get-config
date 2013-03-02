@@ -20,6 +20,7 @@ my $sock = IO::Socket::INET->new(
 my $select = IO::Select->new($sock);
 my $seq = rand(65535);
 my $state = 0;
+my $portcount = 5;
 my $DEBUG = 0;
 my $swmac = "\0x00\0x00\0x00\0x00\0x00\0x00";
 my $DST_ADDR = pack('CCCC', 172,16,0,255);
@@ -104,7 +105,11 @@ while($isAlive) {
 		my($vlan, $membership) = unpack('na2', $val);
 		my($uports, $tports) = unpack('CC', $membership);
 		my $pvids = $tports ^ $uports;
-		printf "VLAN: %.4d m:%s tu:%s p:%s\n", $vlan, substr(unpack('B8', pack('C', $uports)),0,5), substr(unpack('B8', pack('C', $tports)),0,5), substr(unpack('B8', pack('C', $pvids)),0,5);
+		printf "VLAN: %.4d m:%s tu:%s p:%s\n",
+		    $vlan,
+		    substr(unpack('B8', pack('C', $uports)), 0, $portcount),
+		    substr(unpack('B8', pack('C', $tports)), 0, $portcount),
+		    substr(unpack('B8', pack('C', $pvids)), 0, $portcount);
 		next;
 	    }
 	    if ($type == 0x5c00) {
