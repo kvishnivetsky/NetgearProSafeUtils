@@ -1,7 +1,8 @@
 #!/usr/bin/perl -w
+
 #######################################################################
 #
-# NSDP get config script v.1.0b
+# NSDP discovery script v.1.0b
 # Copyright 2012 Konstantin S. Vishnivetsky
 #
 # This program is free software: you can redistribute it and/or modify
@@ -32,26 +33,37 @@ use IO::Select;
 use IO::Socket;
 use Data::Dumper;
 
+my @passwordSalt = (
+    0x4e, 0x74, 0x67, 0x72,
+    0x53, 0x6d, 0x61, 0x72,
+    0x74, 0x53, 0x77, 0x69,
+    0x74, 0x63, 0x68, 0x52,
+    0x6f, 0x63, 0x6b
+);
+
 my $sock = IO::Socket::INET->new(
     Proto     => 'udp',
     LocalAddr => '0.0.0.0',
-#    LocalAddr => '172.16.0.2',
+#    LocalAddr => '192.168.0.254',
     Broadcast => 1,
     LocalPort => 63321,
     ReuseAddr => 1
     ) or die "Can't bind : $@\n";
 
-#$sock->sockopt(SO_BROADCAST() => 1);
+$sock->sockopt(SO_BROADCAST() => 1);
 
 my $select = IO::Select->new($sock);
 my $seq = rand(65535);
 my $state = 0;
 my $portcount = 5;
-my $DEBUG = 0;
-my $swmac = "\0x00\0x00\0x00\0x00\0x00\0x00";
-my $DST_ADDR = pack('CCCC', 172,16,0,255);
+my $DEBUG = 1;
+my $swmac = "\x00\x00\x00\x00\x00\x00";		# Initial value of switch mac address
+my $selfmac = "";				# MAC address of network interface, used for communications witch switch
+my $DST_ADDR = pack('CCCC', 255,255,255,255);	# broadcast address, if your system has multiple interfaces,
+						# then use local broadcast for selected network interface
 
-sendDiscover($sock, $seq++);
+getConfig($sock, $seq++);
+printf "Waiting for reply from device...\n" if $DEBUG;
 
 my $isAlive = 1;
 while($isAlive) {
@@ -61,7 +73,7 @@ while($isAlive) {
 	my $from = recv($sock, $data, 1500, 0) || die "recv: $!";
 	my($port, $from_addr) = sockaddr_in($from);
 	my @hexdata = unpack("C*", $data);
-	printf "%s\n", join(' ', map(sprintf("0x%.2x", $_), @hexdata)) if $DEBUG;
+	printf "Recv:[%s]\n", join(' ', map(sprintf("0x%.2x", $_), @hexdata)) if $DEBUG;
 
 	parseNSDP($data);
 
@@ -109,37 +121,53 @@ while($isAlive) {
 		next;
 	    }
 	    if ($type == 0x000b) {
-		printf "DHCP Client: %d\n", unpack('C', $val);
+		my $val = unpack('C', $val);
+		printf "DHCP Client: %d\n", $val if defined($val);
 		next;
 	    }
 	    if ($type == 0x000d) {
 		printf "Firmware version: %s\n", $val;
 		next;
 	    }
+	    if ($type == 0x0010) {
+		my $val = unpack('C', $val);
+		printf "TFTP Server: %d\n", $val if defined($val);
+		next;
+	    }
 	    if ($type == 0x0c00) {
 #		my $val = substr($data, $offset, $len); $offset += $len;
 		my($port, $speed, $duplex) = unpack('CCC', $val);
-		printf "Port: %d, Speed: %s, Duplex: %d\n", $port, portSpeed($speed), $duplex;
+		printf "Port status: %d, Speed: %s, Duplex: %d\n", $port, portSpeed($speed), $duplex;
 		next;
 	    }
 	    if ($type == 0x1000) {
 		my @stat = unpack('CNNNNNNNNNNNN', $val);
-		printf "T(%.2x)L(%d)V(%d,%d,%d,%d,%d,%d,%d)\n", $type, $len, $stat[0], $stat[1], $stat[3], $stat[5], $stat[7], $stat[9], $stat[11];
+		printf "Packet statistics: %d,%d,%d,%d,%d,%d,%d\n", $stat[0], $stat[1], $stat[3], $stat[5], $stat[7], $stat[9], $stat[11];
+		next;
+	    }
+	    if ($type == 0x1c00) {
+		printf "Port diagbostics %s\n", join(' ', map(sprintf('%.2x', $_), unpack('C'.$len, $val)));
+		next;
+	    }
+	    if ($type == 0x2000) {
+		my $val = unpack('C', $val);
+		printf "VLAN mode: %d\n", $val if defined($val);
 		next;
 	    }
 	    if ($type == 0x2800) {
 		my($vlan, $membership) = unpack('na2', $val);
-		my($uports, $tports) = unpack('CC', $membership);
-		my $pvids = $tports ^ $uports;
-		printf "VLAN: %.4d m:%s tu:%s p:%s\n",
+		next if !(defined($vlan) && defined($membership));
+		my($mports, $tags) = unpack('CC', $membership);
+		my $pvids = $mports ^ $tags;
+		printf "VLAN: %.4d m:%s t:%s p:%s\n",
 		    $vlan,
-		    substr(unpack('B8', pack('C', $uports)), 0, $portcount),
-		    substr(unpack('B8', pack('C', $tports)), 0, $portcount),
+		    substr(unpack('B8', pack('C', $mports)), 0, $portcount),
+		    substr(unpack('B8', pack('C', $tags)), 0, $portcount),
 		    substr(unpack('B8', pack('C', $pvids)), 0, $portcount);
 		next;
 	    }
 	    if ($type == 0x5c00) {
-		printf "T(%.2x)L(%d)V(%s)\n", $type, $len, join(' ', map(sprintf('%.2x', $_), unpack('C*', $val)));
+		printf "Port miroring mode: %s\n", join(' ', map(sprintf('%.2x', $_), unpack('C*', $val)));
 		next;
 	    }
 	    if ($len == 0x01) {
@@ -156,15 +184,30 @@ while($isAlive) {
 	$isAlive = 0;
     }
 }
+if (defined($ARGV[0])) {
+    if ($ARGV[0] eq '-w') {
+	setConfig($sock, $seq++, $swmac, 'password');
+	my @ready = $select->can_read(30);
+	if (@ready) {
+	    my $data = undef;
+	    my $from = recv($sock, $data, 1500, 0) || die "recv: $!";
+	    my($port, $from_addr) = sockaddr_in($from);
+	    my @hexdata = unpack("C*", $data);
+	    printf "Recv:[%s]\n", join(' ', map(sprintf("0x%.2x", $_), @hexdata)) if $DEBUG;
+
+	    parseNSDP($data);
+	}
+    }
+}
 
 $sock->close();
 
 exit;
 
-sub sendDiscover {
+sub getConfig {
     my $sock = shift;
     my $seq = shift;
-    my $msg = pack('na6a6a6Sna4N', 0x0101, "\0x00\0x00\0x00\0x00\0x00\0x00", "\xe0\x69\x95\x38\x97\x69", "\x00\x00\x00\x00\x00\x00", 0x0000, $seq, "NSDP", 0x00000000);
+    my $msg = pack('na6a6a6Sna4N', 0x0101, "\x00\x00\x00\x00\x00\x00", $selfmac, "\x00\x00\x00\x00\x00\x00", 0x0000, $seq, "NSDP", 0x00000000);
     $msg .= "\x00\x01\x00\x00";
     $msg .= "\x00\x02\x00\x00";
     $msg .= "\x00\x03\x00\x00";
@@ -178,9 +221,11 @@ sub sendDiscover {
     $msg .= "\x00\x0d\x00\x00";
     $msg .= "\x00\x0f\x00\x00";
     $msg .= "\x0c\x00\x00\x00";
-    $msg .= "\x10\x00\x00\x00";
+#    $msg .= "\x10\x00\x00\x00";
+#    $msg .= "\x1c\x00\x00\x00";
+    $msg .= "\x20\x00\x00\x00";
     $msg .= "\x28\x00\x00\x00";
-    $msg .= "\x5c\x00\x00\x00";
+#    $msg .= "\x5c\x00\x00\x00";
     $msg .= "\xff\xff\x00\x00";
     my @hexdata = unpack("C*", $msg);
     printf "%s\n", join(' ', map(sprintf("0x%.2x", $_), @hexdata)) if $DEBUG;
@@ -188,17 +233,32 @@ sub sendDiscover {
     $sock->send($msg, 0, $dst) or die "send: $!";
 };
 
-sub sendPassword {
+# For Firmware version 1.02.02 and newer
+sub saltPassword {
+    my @passwordOrigin = unpack("C*", shift);
+    my @passwordSalted;
+    for (my $i=0; $i < (@passwordOrigin + 0); $i++) {
+	$passwordSalted[$i] = $passwordSalt[$i % (@passwordSalt + 0)] ^ $passwordOrigin[$i];
+    }
+    return pack("C*", @passwordSalted);
+};
+
+sub setConfig {
     my $sock = shift;
     my $seq = shift;
     my $swmac = shift;
     my $password = shift;
-    my $msg = pack('na6a6a6Sna4N', 0x0103, "\000\000\000\000\000\000", "\xe0\x69\x95\x38\x97\x69", $swmac, 0x0000, $seq, "NSDP", 0x0000);
-    $msg .= pack('nna'.length($password), 0x000a, length($password), $password); # TLV with password
-    $msg .= pack('nnCCCC', 0x000b, 0x0001, 0); # DHCP mode On|Off
-    $msg .= pack('nnCCCC', 0x0006, 0x0004, 172,16,0,3); # Device IP address
+
+    my $msg = pack('na6a6a6Sna4N', 0x0103, "\x00\x00\x00\x00\x00\x00", $selfmac, $swmac, 0x0000, $seq, "NSDP", 0x0000);
+    $msg .= pack('nna'.length($password), 0x000a, length($password), saltPassword($password)); # TLV with password
+    $msg .= pack('nnC', 0x000b, 0x0001, 1); # DHCP mode On|Off
+    $msg .= pack('nnCCCC', 0x0006, 0x0004, 192,168,0,239); # Device IP address
     $msg .= pack('nnCCCC', 0x0007, 0x0004, 255,255,255,0); # Device IP address
-    $msg .= pack('nnCCCC', 0x0008, 0x0004, 172,16,0,2); # GW IP address
+    $msg .= pack('nnCCCC', 0x0008, 0x0004, 192,168,0,254); # GW IP address
+
+    $msg .= pack('nnC', 0x2000, 0x0001, 0x04); # Enable advanced 8021q VLANs
+    $msg .= pack('nnnCC', 0x2800, 0x0004, 0001, unpack('C', pack('B8', '11111000')), unpack('C', pack('B8', '11111000'))); # vlan, memeber then tagged ports
+
     $msg .= pack('nn', 0xffff, 0x0000); # trailer
     my @hexdata = unpack("C*", $msg);
     printf "%s\n", join(' ', map(sprintf("0x%.2x", $_), @hexdata));
@@ -208,10 +268,11 @@ sub sendPassword {
 
 sub parseNSDP {
     my $data = shift;
-    my($ctype, $reserved, $selfmac, $dstmac, $reserved1, $seq, $sign, $reserved2) = unpack('na6a6a6a2na4Nn', $data);
+    my($ctype, $result, $reserved, $selfmac, $dstmac, $reserved1, $seq, $sign, $reserved2) = unpack('nna4a6a6a2na4Nn', $data);
     my @selfmac_ = unpack('C6', $selfmac);
     my @dstmac_ = unpack('C6', $dstmac);
     printf "ctype=%.4x\n", $ctype if $DEBUG;
+    printf "result=%.4x\n", $result if $DEBUG;
     printf "selfmac=%s\n", join(':', map(sprintf("%.2x", $_), @selfmac_)) if $DEBUG;
     printf "dstmac=%s\n", join(':', map(sprintf("%.2x", $_), @dstmac_)) if $DEBUG;
     printf "seq=%.4x\n", $seq if $DEBUG;

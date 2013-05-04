@@ -39,12 +39,12 @@ use Data::Dumper;
 #               !!! ATTENTION !!!!
 ############ Initial config begin #####################################
 my $DEBUG = 0;
-my $selfmac = ;	# HWAddr of your network interface Example: "\x00\x05\x5d\x74\x73\x3d" (in most cases you need to set it once)
-my $swmac   = ;	# HWAddr of your NETGEAR prosafe switch Example: "\xe0\x91\xf5\x93\x6e\x2d"
-my $sw_ip   = ; # IP address of your NETGEAR prosafe switch Example '172.16.0.3'
-my $sw_fw   = ; # Firmware in *.hex file
+my $selfmac = "";	# HWAddr of your network interface Example: "\x00\x05\x5d\x74\x73\x3d" (in most cases you need to set it once)
+my $swmac   = "";	# HWAddr of your NETGEAR prosafe switch Example: "\xe0\x91\xf5\x93\x6e\x2d"
+my $sw_ip   = '192.168.0.239'; # IP address of your NETGEAR prosafe switch Example '192.168.0.239'
+my $sw_fw   = 'GS105E_v1.02.04.HEX'; # Firmware in *.hex file
 #my $DST_ADDR = pack('CCCC', 255,255,255,255);	# Global broadcast addr - use on single interface host
-#my $DST_ADDR = pack('CCCC', 172,16,0,255);	# Local broadcast addr of your network - use on multiple interface host
+my $DST_ADDR = pack('CCCC', 255,255,255,255);	# Local broadcast addr of your network - use on multiple interface host
 ############ Initial config end ################
 
 my $seq = rand(65535);
